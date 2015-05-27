@@ -5,6 +5,7 @@ import maya.OpenMaya as om
 import math
 import numpy as np
 import random
+import png
 from scipy.spatial import Voronoi as vor
 from collections import defaultdict
 from region import Region
@@ -28,7 +29,6 @@ class TerrainNode(omMPx.MPxNode):
             #remove all infinites values
             self.regions = self.removeNegatives( vorObjnp.regions )
 
-            self.vertices3d = None
     
         def removeNegatives( self, listPoints ):
             rList = []
@@ -49,6 +49,9 @@ class TerrainNode(omMPx.MPxNode):
         omMPx.MPxNode.__init__(self)
         self.regionsDictObj={}
         self.adjVertices = defaultdict( list )
+
+        #vertices to be used to generate terrain mesh
+        self.vertices3d = None
         
     
     def compute(self, pPlug, pDataBlock):
@@ -62,12 +65,8 @@ class TerrainNode(omMPx.MPxNode):
             curveObj = inputMeshHandle.asNurbsCurve()
             inCurve = om.MFnNurbsCurve(curveObj)
 
-            cLen = inCurve.length()
-            nPars =  inCurve.findParamFromLength(cLen)
-            # print 'num of parameters' + str(nPars)
-
-            self.cPoints = self.computePointsCurve( nPars, inCurve )
-            print self.cPoints
+            self.cPoints = self.computePointsCurve( inCurve )
+            # print self.cPoints
 
             #add limit to map to avoid infinity values
             rPoints = self.computeBoundary(self.cPoints)
@@ -84,15 +83,111 @@ class TerrainNode(omMPx.MPxNode):
 
             self.computeRiverAltitude( )
 
+            ########
+            #Image generation
+            ########
+            #the maximum point in the terrain is
+            #ALWAYS the last value in rPoints
+            maxPoint = rPoints[-1][0]
+            self.generateImage ( maxPoint, inCurve )
+
+
+            ########
+            #Node output
+            ########
+            outputHandle = pDataBlock.outputValue( TerrainNode.outputMeshAttribute )
+
+            dataCreator = om.MFnMeshData()
+            newOutputData = dataCreator.create()
+
+            self.generateTerrain( vorObj, newOutputData )
+
+            outputHandle.setMObject(newOutputData)
+            pDataBlock.setClean(pPlug)
+
             
         else:
             return om.kUnknownParameter
 
+    def generateTerrain( self, vorObj, outData ):
+
+        self.vertices3d = []
+
+        #insert zeros to Y values
+        for i in range( 0, len( vorObj.vertices ) ):
+            tv = vorObj.vertices[i]
+            tv.insert( 1, 0.0 )
+            self.vertices3d.append( tv )
+
+
+        for region in self.regionsDictObj.values():
+            for vertexIndex in region.regionI:
+                self.vertices3d[vertexIndex][1] = region.pointY
+                # if region.nextEdge is not None:
+                #     # if vertexIndex in region.nextEdge:
+                #         #sum Y value to vertex
+                #     yDist = region.pointY
+                #     print yDist
+                #     self.vertices3d[vertexIndex][1] = yDist
+
+        vtx = []
+        for v in self.vertices3d:
+            vtx.append (om.MFloatPoint(v[0], v[1], v[2]))
+
+        numVertices = len(vtx)
+
+        points = om.MFloatPointArray()
+        points.setLength(numVertices)
+        for i in range(0, numVertices):
+            points.set(vtx[i], i)
+
+
+        vorFaces = []
+        pointCount = 0
+        faceCount = 0
+
+        numPolConnects = 0
+
+        #get the number of polygons on the terrain
+        numPolCounts = len(self.regionsDictObj)
+        polCounts = om.MIntArray()
+        polCounts.setLength(numPolCounts)
+
+        polCountI = 0
+        for region in self.regionsDictObj.values():
+            numVerticesRegion = len(region.regionI)
+            polCounts.set(numVerticesRegion, polCountI)
+            numPolConnects = numPolConnects + numVerticesRegion
+            polCountI = polCountI + 1
+
+        # print numPolConnects
+        polConnects = om.MIntArray()
+        polConnects.setLength(numPolConnects)
+
+
+        faceConI = 0
+        for region in self.regionsDictObj.values():
+            for vertexIndex in region.regionI:
+                polConnects.set(vertexIndex, faceConI)
+                faceConI = faceConI + 1
+
+
+        #checklist to create a mesh:
+        ## numVertices - ok
+        ## numPolygons - numPolCounts
+        ## vertexArray - points
+        ## polygonCounts - polCounts
+        ## polygonConnects - polConnects
+        ## 
+        meshFS = om.MFnMesh()
+        newMesh = meshFS.create(numVertices, numPolCounts, points, polCounts, polConnects, outData)
+
+        return newMesh
 
     def computeVoronoi( self, points ):
         #transform array to numpy
         npPoints = np.array( points )
-        print npPoints
+        # print npPoints
         #compute voronoi
         npVorObj = vor( npPoints )
         return self.Voronoi( npVorObj )
@@ -146,7 +241,7 @@ class TerrainNode(omMPx.MPxNode):
             tY += dist*math.tan(rAngle[i])
             self.regionsDictObj[i].setEPAltitude( tY )
             self.regionsDictObj[i-1].setNextEdgeAltitude( eY )
-            print eY
+            # print eY
 
     def calcDist( self, pA, pB ):
         result = ( pA[0] - pB[0] )*( pA[0] - pB[0] ) + ( pA[1] - pB[1] )*( pA[1] - pB[1] )
@@ -194,10 +289,13 @@ class TerrainNode(omMPx.MPxNode):
             for vertex in region.regionI:
                 self.adjVertices[vertex].append (key)
 
-    def computePointsCurve( self, nPars, curve ):
+    def computePointsCurve( self, curve, divisions = 1 ):
+        cLen = curve.length()
+        nPars =  curve.findParamFromLength(cLen)
+        # print 'num of parameters' + str(nPars)
         #equal distance between each parameter
         #math.ceil solve problem with rounding
-        lenPars = nPars / math.ceil(nPars)
+        lenPars = (nPars / math.ceil(nPars)) / divisions
         # print 'len btw par' + str(lenPars)
         sumPars = 0
         cPoints = []
@@ -237,6 +335,82 @@ class TerrainNode(omMPx.MPxNode):
 
         return maxPoint
 
+##########################################################
+# Image Generation.
+##########################################################
+    def generateImage( self, maxPoint, curve ):
+        #width, heigth
+        imgRes = [ 100, 100 ]
+        points = self.computePointsCurve( curve, 100 )
+        image = self.createImgArray( points, maxPoint, imgRes )
+
+        imgObj = png.from_array(image, 'RGB')
+        imgObj.save( 'test.png')
+        # for line in image:
+        #     print line
+
+    def createImgArray( self, points, maxPoint, imgRes ):
+        image = self.fillZeros ( imgRes )
+        for point in points:
+            pointInImage = self.newRange (maxPoint, point, imgRes)
+            #set 1 where the curve pass
+            image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ] = 255
+            image[ pointInImage[0]   ][ pointInImage[1]*3 + 1  ] = 255
+            image[ pointInImage[0]   ][ pointInImage[1]*3 + 2  ] = 255
+
+            # #set 1 to the NEIGHBOURS
+            image[ pointInImage[0]+1 ][ pointInImage[1]*3 + 0  ] = 255
+            image[ pointInImage[0]+1 ][ pointInImage[1]*3 + 1  ] = 255
+            image[ pointInImage[0]+1 ][ pointInImage[1]*3 + 2  ] = 255
+
+            image[ pointInImage[0]   ][ (pointInImage[1]+1)*3 + 0 ] = 255
+            image[ pointInImage[0]   ][ (pointInImage[1]+1)*3 + 1 ] = 255
+            image[ pointInImage[0]   ][ (pointInImage[1]+1)*3 + 2 ] = 255
+
+            # image[ pointInImage[0]+1 ][ pointInImage[1]+1 ] = white
+
+            # image[ pointInImage[0]-1 ][ pointInImage[1]   ] = white
+
+            # image[ pointInImage[0]   ][ pointInImage[1]-1 ] = white
+
+            # image[ pointInImage[0]-1 ][ pointInImage[1]-1 ] = white
+
+        ##initial point should be RED
+        pointInImage = self.newRange (maxPoint, points[0], imgRes)
+        image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ] = 255
+        image[ pointInImage[0]   ][ pointInImage[1]*3 + 1  ] = 0
+        image[ pointInImage[0]   ][ pointInImage[1]*3 + 2  ] = 0
+
+        ##goal point is GREEN
+        pointInImage = self.newRange (maxPoint, points[-1], imgRes)
+        image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ] = 0
+        image[ pointInImage[0]   ][ pointInImage[1]*3 + 1  ] = 255
+        image[ pointInImage[0]   ][ pointInImage[1]*3 + 2  ] = 0
+        return image
+
+    def newRange ( self, maxValue, value, imgRes ):
+        oldRange = 2*maxValue
+        # oldRange = (OldMax - OldMin)
+        newValue = [ 0, 0 ]
+        newValue[0] = int((((value[1] + maxValue) * imgRes[0]) / oldRange))
+        newValue[1] = int((((value[0] + maxValue) * imgRes[1]) / oldRange))
+        return newValue
+
+
+    def fillZeros( self, imgRes ):
+        image = []
+        for i in range( 0, imgRes[0] ):
+            line = []
+            for j in range( 0, imgRes[1] ):
+                r = 0
+                line.append( r )
+                g = 0
+                line.append( g )
+                b = 0
+                line.append( b )
+
+            image.append( line )
+        return image
         
 ##########################################################
 # Plug-in initialization.
