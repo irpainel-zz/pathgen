@@ -10,6 +10,32 @@ from scipy.spatial import Voronoi as vor
 from collections import defaultdict
 from region import Region
 
+''' how to rounding
+points = [(-7.66584,0,1.287069),(-7.067755,0,-0.577034),(-5.871584,0,-4.305242),(-0.435031,0,5.852464),(5.794102,0,-8.565758),(6.457351,0,5.83384),(9.227738,0,1.930198),(10.612932,0,-0.0216233)]
+import maya.cmds as cmds
+
+cmds.file( newFile=True, force=True )
+
+cmds.unloadPlugin( 'terrainNode.py' )
+cmds.loadPlugin( 'terrainNode.py' )
+
+cmds.createNode( 'TerrainNode', name='terrainNode1' )
+
+cmds.createNode("transform", name="terrain1")
+cmds.createNode( 'mesh', name='terrainShape1', parent="terrain1" )
+cmds.sets("terrainShape1", add="initialShadingGroup")
+
+cmds.curve( p=points )
+
+# Connect the attributes.
+cmds.connectAttr( 'curveShape1.local', 'terrainNode1.inputCurve' )
+
+cmds.connectAttr( 'terrainNode1.outputMesh', 'terrainShape1.inMesh' )
+'''
+
+
+
+
 # Plug-in information:
 kPluginNodeName = 'TerrainNode'           # The name of the node.
 kPluginNodeId = om.MTypeId( 0xBEEF4 ) # A unique ID associated to this node type.
@@ -48,7 +74,7 @@ class TerrainNode(omMPx.MPxNode):
         # (!) Make sure you call the base class's constructor.
         omMPx.MPxNode.__init__(self)
         self.regionsDictObj={}
-        self.adjVertices = defaultdict( list )
+        self.adjVertices = None
 
         #vertices to be used to generate terrain mesh
         self.vertices3d = None
@@ -112,6 +138,7 @@ class TerrainNode(omMPx.MPxNode):
     def generateTerrain( self, vorObj, outData ):
 
         self.vertices3d = []
+        # print self.adjVertices
 
         #insert zeros to Y values
         for i in range( 0, len( vorObj.vertices ) ):
@@ -119,16 +146,28 @@ class TerrainNode(omMPx.MPxNode):
             tv.insert( 1, 0.0 )
             self.vertices3d.append( tv )
 
+        rObj = self.regionsDictObj
+        for index, regionsI in self.adjVertices.items():
+            maxY = 0
+            # print 'v: ' + str(index)
+            for regionI in regionsI:
+                rPointY = rObj[regionI].pointY
+                # print 'r: ' + str(regionI) + ' alt: ' + str(rPointY)
+                if rPointY > maxY:
+                    maxY = rPointY
+                    # print 'max: ' + str(maxY)
+            self.vertices3d[index][1] = maxY
 
-        for region in self.regionsDictObj.values():
-            for vertexIndex in region.regionI:
-                self.vertices3d[vertexIndex][1] = region.pointY
-                # if region.nextEdge is not None:
-                #     # if vertexIndex in region.nextEdge:
-                #         #sum Y value to vertex
-                #     yDist = region.pointY
-                #     print yDist
-                #     self.vertices3d[vertexIndex][1] = yDist
+
+        # for region in self.regionsDictObj.values():
+        #     for vertexIndex in region.regionI:
+        #         # self.vertices3d[vertexIndex][1] = region.pointY
+        #         if region.nextEdge is not None:
+        #             # if vertexIndex in region.nextEdge:
+        #                 #sum Y value to vertex
+        #             yDist = region.pointY
+        #             print yDist
+        #             self.vertices3d[vertexIndex][1] = yDist
 
         vtx = []
         for v in self.vertices3d:
@@ -285,9 +324,13 @@ class TerrainNode(omMPx.MPxNode):
         return inside
 
     def computeAdjacentVertices( self ):
+        self.adjVertices = defaultdict( list )
         for key, region in self.regionsDictObj.items():
+            # print region.regionI
             for vertex in region.regionI:
-                self.adjVertices[vertex].append (key)
+                if key not in self.adjVertices[vertex]:
+                    self.adjVertices[vertex].append (key)
+                # print self.adjVertices[vertex]
 
     def computePointsCurve( self, curve, divisions = 1 ):
         cLen = curve.length()
@@ -308,9 +351,9 @@ class TerrainNode(omMPx.MPxNode):
             pointL = [p.x, p.z]
             #append each point point to the array
             cPoints.append(pointL)
-
+            # print sumPars
             sumPars = sumPars + lenPars
-
+        # print cPoints
         return cPoints
 
     def computeBoundary( self, cPoints ):
@@ -342,18 +385,82 @@ class TerrainNode(omMPx.MPxNode):
         #width, heigth
         imgRes = [ 100, 100 ]
         points = self.computePointsCurve( curve, 100 )
-        image = self.createImgArray( points, maxPoint, imgRes )
 
+        # image for PNG output, old implementation
+        image = self.createImgArrayForPNG( points, maxPoint, imgRes )
+        # print image
         imgObj = png.from_array(image, 'RGB')
         imgObj.save( 'test.png')
+        # for i in imgObj.rows
+        #     print i
         # for line in image:
         #     print line
 
-    def createImgArray( self, points, maxPoint, imgRes ):
-        image = self.fillZeros ( imgRes )
+
+        #TODO
+        '''
+        imgObj = om.MImage()
+        imgObj.create(imgRes[0], imgRes[1], 3, OpenMaya.MImage.kFloat )
+
+        #image for NODE output
+        self.populateImgArrayForNode( imgObj.floatPixels(), points, maxPoint, imgRes )
+        '''
+
+    def populateImgArrayForNode( self, points, maxPoint, imgRes ):
+        #this function should be used to output an image to the crowd sim
+        # image = self.fillZeros ( imgRes )
+        index = 0
         for point in points:
             pointInImage = self.newRange (maxPoint, point, imgRes)
             #set 1 where the curve pass
+            pixel = (imgRes[0] * pointInImage[0]) + (pointInImage[1]*3)
+            image[ pixel + 0 ] = 255
+            image[ pixel + 1 ] = 255
+            image[ pixel + 2 ] = 255
+
+            # image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ] = 255
+            # image[ pointInImage[0]   ][ pointInImage[1]*3 + 1  ] = 255
+            # image[ pointInImage[0]   ][ pointInImage[1]*3 + 2  ] = 255
+
+            # # #set 1 to the NEIGHBOURS
+            # image[ pointInImage[0]+1 ][ pointInImage[1]*3 + 0  ] = 255
+            # image[ pointInImage[0]+1 ][ pointInImage[1]*3 + 1  ] = 255
+            # image[ pointInImage[0]+1 ][ pointInImage[1]*3 + 2  ] = 255
+
+            # image[ pointInImage[0]   ][ (pointInImage[1]+1)*3 + 0 ] = 255
+            # image[ pointInImage[0]   ][ (pointInImage[1]+1)*3 + 1 ] = 255
+            # image[ pointInImage[0]   ][ (pointInImage[1]+1)*3 + 2 ] = 255
+
+            # image[ pointInImage[0]+1 ][ pointInImage[1]+1 ] = white
+
+            # image[ pointInImage[0]-1 ][ pointInImage[1]   ] = white
+
+            # image[ pointInImage[0]   ][ pointInImage[1]-1 ] = white
+
+            # image[ pointInImage[0]-1 ][ pointInImage[1]-1 ] = white
+
+        # #initial point should be RED
+        # pointInImage = self.newRange (maxPoint, points[0], imgRes)
+        # image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ] = 255
+        # image[ pointInImage[0]   ][ pointInImage[1]*3 + 1  ] = 0
+        # image[ pointInImage[0]   ][ pointInImage[1]*3 + 2  ] = 0
+
+        # ##goal point is GREEN
+        # pointInImage = self.newRange (maxPoint, points[-1], imgRes)
+        # image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ] = 0
+        # image[ pointInImage[0]   ][ pointInImage[1]*3 + 1  ] = 255
+        # image[ pointInImage[0]   ][ pointInImage[1]*3 + 2  ] = 0
+        return image
+
+
+    #create array to be used with PNG Library
+    def createImgArrayForPNG( self, points, maxPoint, imgRes ):
+        image = self.fillZeros ( imgRes )
+        # print image
+        for point in points:
+            pointInImage = self.newRange (maxPoint, point, imgRes)
+            #set 1 where the curve pass
+            # print image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ]
             image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ] = 255
             image[ pointInImage[0]   ][ pointInImage[1]*3 + 1  ] = 255
             image[ pointInImage[0]   ][ pointInImage[1]*3 + 2  ] = 255
@@ -367,15 +474,7 @@ class TerrainNode(omMPx.MPxNode):
             image[ pointInImage[0]   ][ (pointInImage[1]+1)*3 + 1 ] = 255
             image[ pointInImage[0]   ][ (pointInImage[1]+1)*3 + 2 ] = 255
 
-            # image[ pointInImage[0]+1 ][ pointInImage[1]+1 ] = white
-
-            # image[ pointInImage[0]-1 ][ pointInImage[1]   ] = white
-
-            # image[ pointInImage[0]   ][ pointInImage[1]-1 ] = white
-
-            # image[ pointInImage[0]-1 ][ pointInImage[1]-1 ] = white
-
-        ##initial point should be RED
+        #initial point should be RED
         pointInImage = self.newRange (maxPoint, points[0], imgRes)
         image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ] = 255
         image[ pointInImage[0]   ][ pointInImage[1]*3 + 1  ] = 0
@@ -386,6 +485,7 @@ class TerrainNode(omMPx.MPxNode):
         image[ pointInImage[0]   ][ pointInImage[1]*3 + 0  ] = 0
         image[ pointInImage[0]   ][ pointInImage[1]*3 + 1  ] = 255
         image[ pointInImage[0]   ][ pointInImage[1]*3 + 2  ] = 0
+
         return image
 
     def newRange ( self, maxValue, value, imgRes ):
@@ -397,19 +497,35 @@ class TerrainNode(omMPx.MPxNode):
         return newValue
 
 
-    def fillZeros( self, imgRes ):
-        image = []
-        for i in range( 0, imgRes[0] ):
-            line = []
-            for j in range( 0, imgRes[1] ):
-                r = 0
-                line.append( r )
-                g = 0
-                line.append( g )
-                b = 0
-                line.append( b )
+    def fillZeros( self, imgRes, PNG=True ):
 
-            image.append( line )
+        if PNG:
+            #list row flat pixel construction
+            image = []
+            for i in range( 0, imgRes[0] ):
+                line = []
+                for j in range( 0, imgRes[1] ):
+                    r = 0
+                    line.append( r )
+                    g = 0
+                    line.append( g )
+                    b = 0
+                    line.append( b )
+
+                image.append( line )
+
+        else:
+            #flat row flat pixel construction
+            image = []
+            for i in range( 0, imgRes[0] ):
+                for j in range( 0, imgRes[1] ):
+                    r = 0
+                    image.append( r )
+                    g = 0
+                    image.append( g )
+                    b = 0
+                    image.append( b )
+
         return image
         
 ##########################################################
