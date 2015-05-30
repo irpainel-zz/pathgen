@@ -8,9 +8,8 @@ import random
 import png
 from scipy.spatial import Voronoi as vor
 from collections import defaultdict
-from region import Region
 
-''' how to rounding
+''' how to run
 points = [(-7.66584,0,1.287069),(-7.067755,0,-0.577034),(-5.871584,0,-4.305242),(-0.435031,0,5.852464),(5.794102,0,-8.565758),(6.457351,0,5.83384),(9.227738,0,1.930198),(10.612932,0,-0.0216233)]
 import maya.cmds as cmds
 
@@ -48,6 +47,10 @@ class TerrainNode(omMPx.MPxNode):
     inputCurveAttribute = om.MObject()
     outputMeshAttribute = om.MObject()
 
+
+    ##########################################################
+    # CLASS VORONOI
+    ##########################################################
     class Voronoi:
         def __init__(self, vorObjnp ):
             self.vertices = vorObjnp.vertices.tolist()
@@ -69,6 +72,38 @@ class TerrainNode(omMPx.MPxNode):
                         rList.append(x)
             return rList
 
+
+    ##########################################################
+    # CLASS REGION
+    ##########################################################
+    class Region:
+    
+        def __init__(self, idEP, point, regionI ):
+            self.id = idEP
+            #edit point coordinates
+            self.point = point
+            self.pointY = 0
+            self.regionI = regionI
+            self.nextEdge = None
+            self.nextEdgeY = 0
+
+        #set the edge that is boundary with the next EP ( next river Point )
+        def setBoundary( self, edge ):
+            self.nextEdge = edge
+
+        def setEPAltitude( self, y ):
+            self.pointY = y
+
+        def setNextEdgeAltitude( self, y ):
+            self.nextEdgeY = y
+
+        def addNoise( self, vertices ):
+            for vI in self.regionI:
+                print vertices[vI]
+
+    ##########################################################
+    # PLUGIN METHODS
+    ##########################################################
     def __init__(self):
         ''' Constructor. '''
         # (!) Make sure you call the base class's constructor.
@@ -169,6 +204,8 @@ class TerrainNode(omMPx.MPxNode):
         #             print yDist
         #             self.vertices3d[vertexIndex][1] = yDist
 
+        print self.regionsDictObj[0].addNoise( self.vertices3d )
+
         vtx = []
         for v in self.vertices3d:
             vtx.append (om.MFloatPoint(v[0], v[1], v[2]))
@@ -237,7 +274,7 @@ class TerrainNode(omMPx.MPxNode):
         for region, regionIndex in zip(regionVertices, vorObj.regions):
             for i in range(0, len(cPoints)):
                 if self.pointInRegion ( cPoints[i], region ):
-                    self.regionsDictObj[i] = Region( i, cPoints[i], regionIndex )
+                    self.regionsDictObj[i] = self.Region( i, cPoints[i], regionIndex )
                     continue
 
     def computeRegionBoundary( self ):
@@ -378,9 +415,9 @@ class TerrainNode(omMPx.MPxNode):
 
         return maxPoint
 
-##########################################################
-# Image Generation.
-##########################################################
+    ##########################################################
+    # Image Generation.
+    ##########################################################
     def generateImage( self, maxPoint, curve ):
         #width, heigth
         imgRes = [ 100, 100 ]
