@@ -3,11 +3,17 @@ import sys
 import maya.OpenMayaMPx as omMPx
 import maya.OpenMaya as om
 import math
-import numpy as np
 import random
 import png
-from scipy.spatial import Voronoi as vor
 from collections import defaultdict
+
+##numpy
+import numpy as np
+from scipy.spatial import Voronoi as vor
+
+##noise generator
+from noise import pnoise2, snoise2
+
 
 ''' how to run
 points = [(-7.66584,0,1.287069),(-7.067755,0,-0.577034),(-5.871584,0,-4.305242),(-0.435031,0,5.852464),(5.794102,0,-8.565758),(6.457351,0,5.83384),(9.227738,0,1.930198),(10.612932,0,-0.0216233)]
@@ -86,6 +92,7 @@ class TerrainNode(omMPx.MPxNode):
             self.regionI = regionI
             self.nextEdge = None
             self.nextEdgeY = 0
+            self.noise = None
 
         #set the edge that is boundary with the next EP ( next river Point )
         def setBoundary( self, edge ):
@@ -98,8 +105,80 @@ class TerrainNode(omMPx.MPxNode):
             self.nextEdgeY = y
 
         def addNoise( self, vertices ):
+            regionVertices = {}
+
+            #max and min values in the region 
+            #to generate a rectangle for the noise
             for vI in self.regionI:
-                print vertices[vI]
+                v = vertices[vI]
+                regionVertices[vI] = v
+
+            # print regionVertices.values()
+            regionVerticesValues = regionVertices.values()
+            boundingBox = self.computeBoundingBox( regionVerticesValues )
+
+            minX = boundingBox[0][0]
+            minZ = boundingBox[0][1]
+            maxX = boundingBox[1][0]
+            maxZ = boundingBox[1][1]
+
+            self.noise = {}
+            while minX < maxX:
+                # print str(minX) + ' max: ' + str(maxX)
+                while minZ < maxZ:
+                    if self.pointIn( [minX, minZ], regionVerticesValues ):
+                        self.noise[(minX,minZ)] = snoise2( minX, minZ )
+                    minZ += 0.1
+                minX += 0.1
+                minZ = boundingBox[0][1]
+            # print noise
+            # print 'noised'
+            # for point, noiseY in noise.items():
+            #     if self.pointIn( point, regionVerticesValues ):
+            #         print 'inside'
+            
+        def computeBoundingBox( self, points ):
+            # print points
+            points = iter(points)
+            try:
+                min_x, min_y, min_z = max_x, max_y, max_z = points.next()
+            except StopIteration:
+                raise ValueError, "BoundingBox() requires at least one point"
+            for x, y, z in points:
+                if x < min_x:
+                    min_x = x
+                elif x > max_x:
+                    max_x = x
+                if z < min_z:
+                    min_z = z
+                elif z > max_z:
+                    max_z = z
+            boundingBox = [[min_x, min_z], [max_x, max_z]]
+            # print boundingBox
+            return boundingBox
+
+        #check if point is inside region
+        def pointIn( self, point, region ):
+            poly = region
+            x = point[0]
+            z = point[1]
+            # print point
+            n = len(poly)
+            inside = False
+            # print poly[0]
+            p1x,ply,plz = poly[0]
+            for i in range(n+1):
+                p2x,p2y,p2z = poly[i % n]
+                if z > min(plz,p2z):
+                    if z <= max(plz,p2z):
+                        if x <= max(p1x,p2x):
+                            if plz != p2z:
+                                xints = (z-plz)*(p2x-p1x)/(p2z-plz)+p1x
+                            if p1x == p2x or x <= xints:
+                                inside = not inside
+                p1x,plz = p2x,p2z
+
+            return inside
 
     ##########################################################
     # PLUGIN METHODS
@@ -182,7 +261,14 @@ class TerrainNode(omMPx.MPxNode):
             self.vertices3d.append( tv )
 
         rObj = self.regionsDictObj
+        # outerPolygon = []
         for index, regionsI in self.adjVertices.items():
+            ##get information the outer polygon vertices
+            # if len(regionsI) < 3 :
+            #     outerPolygon.append( index )
+
+            ##get the maximum altitude between the 
+            ##adjacent regions with the vertice
             maxY = 0
             # print 'v: ' + str(index)
             for regionI in regionsI:
@@ -192,6 +278,7 @@ class TerrainNode(omMPx.MPxNode):
                     maxY = rPointY
                     # print 'max: ' + str(maxY)
             self.vertices3d[index][1] = maxY
+        # print outerPolygon
 
 
         # for region in self.regionsDictObj.values():
@@ -203,8 +290,8 @@ class TerrainNode(omMPx.MPxNode):
         #             yDist = region.pointY
         #             print yDist
         #             self.vertices3d[vertexIndex][1] = yDist
-
-        print self.regionsDictObj[0].addNoise( self.vertices3d )
+        # for i in range ( 0, len(self.regionsDictObj) ):
+        #     self.regionsDictObj[i].addNoise( self.vertices3d )
 
         vtx = []
         for v in self.vertices3d:
@@ -243,6 +330,7 @@ class TerrainNode(omMPx.MPxNode):
 
         faceConI = 0
         for region in self.regionsDictObj.values():
+            region.addNoise( self.vertices3d )
             for vertexIndex in region.regionI:
                 polConnects.set(vertexIndex, faceConI)
                 faceConI = faceConI + 1
@@ -263,9 +351,10 @@ class TerrainNode(omMPx.MPxNode):
     def computeVoronoi( self, points ):
         #transform array to numpy
         npPoints = np.array( points )
-        # print npPoints
+        
         #compute voronoi
         npVorObj = vor( npPoints )
+        # print npVorObj.vertices
         return self.Voronoi( npVorObj )
 
     def createRegionObjects ( self, vorObj, cPoints ):
@@ -337,7 +426,7 @@ class TerrainNode(omMPx.MPxNode):
         return regionVertices
 
 
-        #check if point is inside region
+    #check if point is inside region
     def pointInRegion( self, point, region ):
         poly = region
         x = point[0]
@@ -396,15 +485,16 @@ class TerrainNode(omMPx.MPxNode):
     def computeBoundary( self, cPoints ):
         maxPoint = self.computeMaxValue( cPoints )
         boundary = maxPoint * 2
-        # print boundary
 
-        #append maximum point to the point list
+        ## append maximum point to the point list
         cPoints.append( [-boundary, -boundary] )
         cPoints.append( [boundary, -boundary] )
         cPoints.append( [-boundary, boundary] )
         cPoints.append( [boundary, boundary] )
+
         return cPoints
-    
+
+
     #points is a list of two tuples
     def computeMaxValue( self, points ):
         # unzip points to get the max value
