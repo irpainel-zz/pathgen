@@ -51,6 +51,15 @@ kPluginNodeId = om.MTypeId( 0xBEEF4 ) # A unique ID associated to this node type
 class TerrainNode(omMPx.MPxNode):
     # Static variables which will later be replaced by the node's attributes.
     inputCurveAttribute = om.MObject()
+    
+    #sliders
+    divisionsAttr = om.MObject()
+    angleAttr = om.MObject()
+    pathSizeAttr = om.MObject()
+    noiseFAttr = om.MObject()
+    octavesAttr = om.MObject()
+
+    #output
     outputMeshAttribute = om.MObject()
 
 
@@ -93,6 +102,7 @@ class TerrainNode(omMPx.MPxNode):
             self.nextEdge = None
             self.nextEdgeY = 0
             self.noise = None
+            self.subRegionObjs = None
 
         #set the edge that is boundary with the next EP ( next river Point )
         def setBoundary( self, edge ):
@@ -103,39 +113,6 @@ class TerrainNode(omMPx.MPxNode):
 
         def setNextEdgeAltitude( self, y ):
             self.nextEdgeY = y
-
-        def addNoise( self, vertices ):
-            regionVertices = {}
-
-            #max and min values in the region 
-            #to generate a rectangle for the noise
-            for vI in self.regionI:
-                v = vertices[vI]
-                regionVertices[vI] = v
-
-            # print regionVertices.values()
-            regionVerticesValues = regionVertices.values()
-            boundingBox = self.computeBoundingBox( regionVerticesValues )
-
-            minX = boundingBox[0][0]
-            minZ = boundingBox[0][1]
-            maxX = boundingBox[1][0]
-            maxZ = boundingBox[1][1]
-
-            self.noise = {}
-            while minX < maxX:
-                # print str(minX) + ' max: ' + str(maxX)
-                while minZ < maxZ:
-                    if self.pointIn( [minX, minZ], regionVerticesValues ):
-                        self.noise[(minX,minZ)] = snoise2( minX, minZ )
-                    minZ += 0.1
-                minX += 0.1
-                minZ = boundingBox[0][1]
-            # print noise
-            # print 'noised'
-            # for point, noiseY in noise.items():
-            #     if self.pointIn( point, regionVerticesValues ):
-            #         print 'inside'
             
         def computeBoundingBox( self, points ):
             # print points
@@ -188,40 +165,68 @@ class TerrainNode(omMPx.MPxNode):
         # (!) Make sure you call the base class's constructor.
         omMPx.MPxNode.__init__(self)
         self.regionsDictObj={}
-        self.adjVertices = None
 
         #vertices to be used to generate terrain mesh
         self.vertices3d = None
         
     
     def compute(self, pPlug, pDataBlock):
-        ''' Here, we will create a voxelized version of the input mesh. '''
         
         if( pPlug == TerrainNode.outputMeshAttribute ):
-            
+            self.regionsDictObj = {}
+
+            #attributes
+            params = {}
+            params['div'] = pDataBlock.inputValue( TerrainNode.divisionsAttr ).asInt()
+            params['angle'] = pDataBlock.inputValue( TerrainNode.angleAttr ).asInt()
+            params['path'] = pDataBlock.inputValue( TerrainNode.pathSizeAttr ).asDouble()
+            params['noiseF'] = pDataBlock.inputValue( TerrainNode.noiseFAttr ).asInt()
+            params['octaves'] = pDataBlock.inputValue( TerrainNode.octavesAttr ).asInt()
+
+            # print params['angle']
+            self.vertices3d = None
             # Get our custom input node attributes and values.
             # print TerrainNode.inputCurveAttribute
             inputMeshHandle = pDataBlock.inputValue( TerrainNode.inputCurveAttribute )
             curveObj = inputMeshHandle.asNurbsCurve()
             inCurve = om.MFnNurbsCurve(curveObj)
 
-            self.cPoints = self.computePointsCurve( inCurve )
-            # print self.cPoints
+            cPoints = self.computePointsCurve( inCurve )
+            # print cPoints
+            # cPoints = self.computePointsCurve( inCurve )
+            # print cPoints
 
+            # self.computePointsCurveL( inCurve )
             #add limit to map to avoid infinity values
-            rPoints = self.computeBoundary(self.cPoints)
+            rPoints = self.computeBoundary(cPoints)
 
             vorObj = self.computeVoronoi( rPoints )
 
             #create a dict with all the region Objects
-            self.createRegionObjects( vorObj, self.cPoints )
-
+            self.createRegionObjects( vorObj, cPoints )
             #vertex X is shared by N faces
-            self.computeAdjacentVertices( )
-
+            adjVertices = self.computeAdjacentVertices( )
+            neighborEdges = self.computeNeighborEdges( adjVertices )
             self.computeRegionBoundary( )
 
-            self.computeRiverAltitude( )
+            self.computeRiverAltitude( params['angle'] )
+
+            self.computeVertices3d( vorObj, adjVertices )
+
+            # self.subdivideTerrain( adjVertices, neighborEdges )
+
+            self.triangulateTerrain( neighborEdges, 10)
+            # print 'passou'
+            # for key, r in self.regionsDictObj.items():
+            #     print 'key', key
+            #     print 'regionI', r.regionI
+            #     print 'point', r.point
+            #     print 'pointY', r.pointY
+            #     print 'nextEdge', r.nextEdge
+            #     print 'nextEY', r.nextEdgeY
+            #     print 'noise', r.noise
+            #     print 'sub', r.subRegionObjs
+
 
             ########
             #Image generation
@@ -240,7 +245,7 @@ class TerrainNode(omMPx.MPxNode):
             dataCreator = om.MFnMeshData()
             newOutputData = dataCreator.create()
 
-            self.generateTerrain( vorObj, newOutputData )
+            self.generateTerrain( vorObj, inCurve, params, newOutputData )
 
             outputHandle.setMObject(newOutputData)
             pDataBlock.setClean(pPlug)
@@ -249,37 +254,37 @@ class TerrainNode(omMPx.MPxNode):
         else:
             return om.kUnknownParameter
 
-    def generateTerrain( self, vorObj, outData ):
 
-        self.vertices3d = []
-        # print self.adjVertices
-
-        #insert zeros to Y values
-        for i in range( 0, len( vorObj.vertices ) ):
-            tv = vorObj.vertices[i]
-            tv.insert( 1, 0.0 )
-            self.vertices3d.append( tv )
-
+    def triangulateTerrain( self, neighborEdges, timesTriangulate = 2 ):
+        v = self.vertices3d
         rObj = self.regionsDictObj
-        # outerPolygon = []
-        for index, regionsI in self.adjVertices.items():
-            ##get information the outer polygon vertices
-            # if len(regionsI) < 3 :
-            #     outerPolygon.append( index )
+        conEdges1, conEdges2 = zip(*neighborEdges.keys())
+        conEdges = defaultdict(list)
+        for i in range ( len(conEdges1) ):
+            # print conEdges1[i], conEdges2[i]
+            conEdges[ conEdges1[i] ].append( conEdges2[i] )
+            conEdges[ conEdges2[i] ].append( conEdges1[i] )     
+        # print conEdges     
+        # print conEdges
+        index = 0
+        while index != len(rObj)-1:
+            region = rObj[index]
+            newEdge = None
+            # print index, 'region', len(region.regionI)
+            if len(region.regionI) > 4:
+                # print 'regionI', len(region.regionI)
+                newEdge = self.findNewEdge( conEdges, region, index )
+                if newEdge:
+                    region = self.splitRegion( index, newEdge, conEdges)
+                    #add new edge to conEdge
+                    conEdges[newEdge[0]].append( newEdge[1] )
+                    conEdges[newEdge[1]].append( newEdge[0] )
+                    # print 'regionI after tri', len(region.regionI)
+                    index = 0
+            else:
+                index += 1 
 
-            ##get the maximum altitude between the 
-            ##adjacent regions with the vertice
-            maxY = 0
-            # print 'v: ' + str(index)
-            for regionI in regionsI:
-                rPointY = rObj[regionI].pointY
-                # print 'r: ' + str(regionI) + ' alt: ' + str(rPointY)
-                if rPointY > maxY:
-                    maxY = rPointY
-                    # print 'max: ' + str(maxY)
-            self.vertices3d[index][1] = maxY
-        # print outerPolygon
-
+    def generateTerrain( self, vorObj, inCurve, params, outData ):
 
         # for region in self.regionsDictObj.values():
         #     for vertexIndex in region.regionI:
@@ -330,7 +335,7 @@ class TerrainNode(omMPx.MPxNode):
 
         faceConI = 0
         for region in self.regionsDictObj.values():
-            region.addNoise( self.vertices3d )
+            # region.addNoise( self.vertices3d )
             for vertexIndex in region.regionI:
                 polConnects.set(vertexIndex, faceConI)
                 faceConI = faceConI + 1
@@ -345,8 +350,141 @@ class TerrainNode(omMPx.MPxNode):
         ## 
         meshFS = om.MFnMesh()
         newMesh = meshFS.create(numVertices, numPolCounts, points, polCounts, polConnects, outData)
+        # iterPolys = om.MItMeshPolygon( meshFS )
+        # print meshFS.numPolygons()
+        # vertexList = om.MIntArray()
+        # for i in range ( meshFS.numPolygons() ):
+        #     meshFS.getPolygonVertices (i, vertexList)
+            # print vertexList
+        # print polConnects
+        faceList = om.MIntArray()
+        faceList.setLength( meshFS.numPolygons() )
+        for i in range ( meshFS.numPolygons() ):
+            faceList.set (i, i)
+            # print faceList
+        meshFS.subdivideFaces(faceList, params['div'] )
+
+
+        # numVertices - ok
+        # numPolygons - numPolCounts
+        # vertexArray - points
+        # polygonCounts - polCounts
+        # polygonConnects - polConnects      
+        numPolygons = meshFS.numPolygons()
+        numVertices = meshFS.numVertices()
+        vertexArray = om.MFloatPointArray()
+        status = meshFS.getPoints(vertexArray)
+        j = 0
+
+        cPoints = self.computePointsCurve( inCurve, divisions = 100 )
+
+        for i in range(0, vertexArray.length()):
+            point = [vertexArray[i].x, vertexArray[i].y, vertexArray[i].z, vertexArray[i].w]
+                # print point
+            j += 1
+            noiseY = self.getNoise( point, 8, 2 )
+            # print noiseY
+            if self.inPath( point, cPoints, params['path'] ):
+                noiseY = self.getNoise( point, params['noiseF']*2, params['octaves']*2 ) + 1
+                point[1] = point[1]*noiseY/2 + point[1]
+            else:
+                noiseY = self.getNoise( point, params['noiseF'], params['octaves'] ) + 1
+                point[1] = point[1]*noiseY + point[1]
+
+
+            ####
+            ##DEMO ONLY, DO NOT USE!!!
+            ####
+            # if self.inPath( point, cPoints, params['path'] ):
+            #     noiseY = self.getNoise( point, params['noiseF']*2, params['octaves']*2 ) + 1
+            #     point[1] = 0
+            # else:
+            #     noiseY = self.getNoise( point, params['noiseF'], params['octaves'] ) + 1
+            #     point[1] = noiseY*3 - 1.5
+            ####
+            ##END DEMO
+            ####
+            vertexArray.set(i, point[0], point[1], point[2], point[3])
+
+            # print point 
+        # print j
+        meshFS.setPoints( vertexArray )
 
         return newMesh
+
+    def inPath( self, point, cPoints, radius=2 ):
+        for cPoint in cPoints:
+            dist = self.difVectors( point, cPoint )
+            if dist < radius:
+                # print radius / dist 
+                return True
+        return False
+
+    def difVectors( self, v3D, v2D ):
+        #using index 0 and 2 to ignore value Y
+        return math.sqrt( ((v3D[0] - v2D[0])**2) + ((v3D[2] - v2D[1])**2) )
+
+    def findNewEdge( self, conEdges, region, index):
+        for i in range( 0, len(region.regionI)):
+            for j in range( i+1, len(region.regionI)):
+                # print i, j, conEdges[region.regionI[i]]
+                if region.regionI[j] not in conEdges[region.regionI[i]]:
+                    return [region.regionI[i], region.regionI[j]]
+            
+
+
+    def splitRegion( self, oldIndex, newEdge, conEdges ):
+        region = self.regionsDictObj[oldIndex]
+        newRegion = newEdge
+        rClosed = False
+        while not rClosed:
+            lastVertice = newRegion[-1]
+            for nV in conEdges[lastVertice]:
+                if nV not in newRegion:
+                    if nV in region.regionI:
+                        newRegion.append(nV)
+                        region.regionI.remove(nV)
+                        break
+                elif nV == newRegion[0]:
+                    rClosed= True
+        # print newRegion
+        newIndex = len(self.regionsDictObj)
+        # print 'newindex', newIndex
+        oldCPoint = region.point
+        newRegionObj = self.Region( newIndex, oldCPoint, newRegion )
+        newRegionObj.pointY = region.pointY
+        self.regionsDictObj[newIndex] = newRegionObj
+        return region
+
+    def computeVertices3d( self, vorObj, adjVertices ):
+        self.vertices3d = []
+        # print adjVertices
+
+        #insert zeros to Y values
+        for i in range( 0, len( vorObj.vertices ) ):
+            tv = vorObj.vertices[i]
+            tv.insert( 1, 0.0 )
+            self.vertices3d.append( tv )
+
+        rObj = self.regionsDictObj
+        # outerPolygon = []
+        for index, regionsI in adjVertices.items():
+            ##get information the outer polygon vertices
+            # if len(regionsI) < 3 :
+            #     outerPolygon.append( index )
+
+            ##get the maximum altitude between the 
+            ##adjacent regions with the vertice
+            maxY = 0
+            # print 'v: ' + str(index)
+            for regionI in regionsI:
+                rPointY = rObj[regionI].pointY
+                # print 'r: ' + str(regionI) + ' alt: ' + str(rPointY)
+                if rPointY > maxY:
+                    maxY = rPointY
+                    # print 'max: ' + str(maxY)
+            self.vertices3d[index][1] = maxY
+        # print outerPolygon
 
     def computeVoronoi( self, points ):
         #transform array to numpy
@@ -388,9 +526,11 @@ class TerrainNode(omMPx.MPxNode):
             return result
 
 
-    def computeRiverAltitude( self, angle=0.1 ):
+    def computeRiverAltitude( self, angle=1 ):
         #default angle is 1 degree
-
+        # print angle
+        angle = angle * 0.0174532925
+        # print angle
         #generate a random value from 0 to angle
         rAngle = []
         for i in range( 0, len(self.regionsDictObj) ):
@@ -450,13 +590,48 @@ class TerrainNode(omMPx.MPxNode):
         return inside
 
     def computeAdjacentVertices( self ):
-        self.adjVertices = defaultdict( list )
+        adjVertices = defaultdict( list )
         for key, region in self.regionsDictObj.items():
-            # print region.regionI
+            # print str(key) + ' key'
             for vertex in region.regionI:
-                if key not in self.adjVertices[vertex]:
-                    self.adjVertices[vertex].append (key)
-                # print self.adjVertices[vertex]
+                # print vertex
+                if key not in adjVertices[vertex]:
+                    adjVertices[vertex].append (key)
+
+        #remove vertices with just one region
+        for index, regions in adjVertices.items():
+            # print 'v: ' + str(index) + ' regions: ' + str(regions)
+            if len(regions) == 1:
+                del adjVertices[index]
+                self.regionsDictObj[regions[0]].regionI.remove(index)
+        return adjVertices
+
+
+    def computeNeighborEdges( self, adjVertices ):
+        neighborEdges = defaultdict( list )
+        # for key, regions in adjVertices.items():
+        #     if len(regions) > 1:
+        # print adjVertices
+        a = adjVertices
+        for i in a:
+            # if len(a[i]) > 1:
+            # print i
+            for nextI in a:
+                if nextI > i:
+                    result = self.intersect(a[i], a[nextI])
+                    if result:
+
+                        if len(a[i]) == 3 and len(a[nextI]) == 3 and len(result)==2:
+                            neighborEdges[(i, nextI)] = result
+                        elif len(a[i]) == 3 and len(a[nextI]) == 2 and len(result)==2:
+                            neighborEdges[(i, nextI)] = result
+                        elif len(a[i]) == 2 and len(a[nextI]) == 2 and len(result)==1:
+                            neighborEdges[(i, nextI)] = result
+                        elif len(a[i]) == 2 and len(a[nextI]) == 3 and len(result)==2:
+                            neighborEdges[(i, nextI)] = result
+                        # break
+        # print str(len(neighborEdges)) + ' edges'
+        return neighborEdges
 
     def computePointsCurve( self, curve, divisions = 1 ):
         cLen = curve.length()
@@ -482,9 +657,30 @@ class TerrainNode(omMPx.MPxNode):
         # print cPoints
         return cPoints
 
+    def computePointsCurveL( self, curve, divisions = 1 ):
+        cLen = curve.length()
+        nPars =  curve.findParamFromLength(cLen)
+        print nPars
+        print cLen
+        divLen = cLen/nPars
+        sumLen = 0
+        cPoints = []
+        while sumLen <= cLen:
+            print sumLen
+            par =  curve.findParamFromLength(sumLen)
+            p = om.MPoint()
+            curve.getPointAtParam(par, p)
+            pointL = [p.x, p.z]
+            #append each point point to the array
+            cPoints.append(pointL)
+            # print sumPars
+            sumLen += divLen
+        # print cPoints
+        return cPoints
+
     def computeBoundary( self, cPoints ):
         maxPoint = self.computeMaxValue( cPoints )
-        boundary = maxPoint * 2
+        boundary = maxPoint * 1.5
 
         ## append maximum point to the point list
         cPoints.append( [-boundary, -boundary] )
@@ -505,12 +701,25 @@ class TerrainNode(omMPx.MPxNode):
 
         return maxPoint
 
+    def getNoise( self, vertices, octaves=4, freq=16 ):
+        freq = freq * octaves
+        noise = snoise2(vertices[0] / freq, vertices[2] / freq, octaves)
+
+        return noise
+
+    ##########################################################
+    # Subdivision
+    ##########################################################
+    # def subdivide( self, region ):
+    #     for vI in region.regionI:
+            
     ##########################################################
     # Image Generation.
     ##########################################################
     def generateImage( self, maxPoint, curve ):
         #width, heigth
-        imgRes = [ 100, 100 ]
+        print int(math.ceil(maxPoint))
+        imgRes = [ int(math.ceil(maxPoint)), int(math.ceil(maxPoint)) ]
         points = self.computePointsCurve( curve, 100 )
 
         # image for PNG output, old implementation
@@ -673,6 +882,54 @@ def nodeInitializer():
     #==================================
     # INPUT NODE ATTRIBUTE(S)
     #==================================
+
+    TerrainNode.pathSizeAttr = nAttr.create( "pathSize", "pz", om.MFnNumericData.kDouble, 1.0 )
+    nAttr.setSoftMin( 1.0 )
+    nAttr.setSoftMax( 5.0 ) 
+    nAttr.setKeyable( True )
+    nAttr.setReadable( True )
+    nAttr.setWritable( True )
+    nAttr.setStorable( True )
+    TerrainNode.addAttribute( TerrainNode.pathSizeAttr )   
+
+    TerrainNode.noiseFAttr = nAttr.create( "noiseFreq", "nf", om.MFnNumericData.kInt, 8 )
+    nAttr.setSoftMin( 1 )
+    nAttr.setSoftMax( 15 ) 
+    nAttr.setKeyable( True )
+    nAttr.setReadable( True )
+    nAttr.setWritable( True )
+    nAttr.setStorable( True )
+    TerrainNode.addAttribute( TerrainNode.noiseFAttr )       
+
+    TerrainNode.octavesAttr = nAttr.create( "octaves", "oc", om.MFnNumericData.kInt, 2 )
+    nAttr.setSoftMin( 1 )
+    nAttr.setSoftMax( 10 ) 
+    nAttr.setKeyable( True )
+    nAttr.setReadable( True )
+    nAttr.setWritable( True )
+    nAttr.setStorable( True )
+    TerrainNode.addAttribute( TerrainNode.octavesAttr )   
+
+    TerrainNode.angleAttr = nAttr.create( "angle", "an", om.MFnNumericData.kInt, 4 )
+    # nAttr.setDefault( 0.5 )
+    nAttr.setSoftMin( 1 )
+    nAttr.setSoftMax( 45 ) 
+    nAttr.setKeyable( True )
+    nAttr.setReadable( True )
+    nAttr.setWritable( True )
+    nAttr.setStorable( True )
+    TerrainNode.addAttribute( TerrainNode.angleAttr )
+
+    TerrainNode.divisionsAttr = nAttr.create( "divisions", "dv", om.MFnNumericData.kInt, 4 )
+    # nAttr.setDefault( 0.5 )
+    nAttr.setSoftMin( 2 )
+    nAttr.setSoftMax( 20 ) 
+    nAttr.setKeyable( True )
+    nAttr.setReadable( True )
+    nAttr.setWritable( True )
+    nAttr.setStorable( True )
+    TerrainNode.addAttribute( TerrainNode.divisionsAttr )
+
     # We will need an input mesh attribute.
     # TerrainNode.inputCurveAttribute = nAttr.create( 'inputCurve', 'ic', om.MFnNumericData.k3Double )
     # nAttr.setWritable( True )
@@ -704,7 +961,12 @@ def nodeInitializer():
     #==================================
     # If any of the inputs change, the output mesh will be recomputed.
     TerrainNode.attributeAffects( TerrainNode.inputCurveAttribute, TerrainNode.outputMeshAttribute )
-    
+    TerrainNode.attributeAffects( TerrainNode.divisionsAttr, TerrainNode.outputMeshAttribute )
+    TerrainNode.attributeAffects( TerrainNode.angleAttr, TerrainNode.outputMeshAttribute )
+    TerrainNode.attributeAffects( TerrainNode.noiseFAttr, TerrainNode.outputMeshAttribute )
+    TerrainNode.attributeAffects( TerrainNode.octavesAttr, TerrainNode.outputMeshAttribute )
+    TerrainNode.attributeAffects( TerrainNode.pathSizeAttr, TerrainNode.outputMeshAttribute )
+
     
 def initializePlugin( mobject ):
     ''' Initialize the plug-in '''
